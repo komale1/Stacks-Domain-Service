@@ -7,12 +7,17 @@
 (define-constant ERROR-INVALID-DOMAIN-NAME (err u103))
 (define-constant ERROR-DOMAIN-EXPIRED (err u104))
 (define-constant ERROR-INSUFFICIENT-PAYMENT (err u105))
+(define-constant ERROR-INVALID-HASH (err u106))
+(define-constant ERROR-INVALID-RECORD-TYPE (err u107))
+(define-constant ERROR-INVALID-RECORD-CONTENT (err u108))
 
 ;; Configuration Constants
 (define-constant REGISTRATION-PERIOD-IN-BLOCKS u52560) ;; ~1 year in blocks
 (define-constant MIN-DOMAIN-LENGTH u3)
 (define-constant MAX-DOMAIN-LENGTH u63)
 (define-constant REGISTRATION-FEE-IN_MICRO_STX u100000) ;; in microSTX
+(define-constant MAX_RECORD_TYPE_LENGTH u128)
+(define-constant MAX_RECORD_CONTENT_LENGTH u256)
 
 ;; Data Maps
 (define-map domain-ownership-registry
@@ -40,6 +45,29 @@
     {dns-record-content: (string-ascii 256)}
 )
 
+;; Private validation functions
+(define-private (is-valid-domain-name (domain-name-to-validate (string-ascii 64)))
+    (and
+        (>= (len domain-name-to-validate) MIN-DOMAIN-LENGTH)
+        (<= (len domain-name-to-validate) MAX-DOMAIN-LENGTH)
+    )
+)
+
+(define-private (is-valid-commitment-hash (hash-to-validate (buff 32)))
+    (is-eq (len hash-to-validate) u32)
+)
+
+(define-private (is-valid-record-type (record-type-to-validate (string-ascii 128)))
+    (and
+        (>= (len record-type-to-validate) u1)
+        (<= (len record-type-to-validate) MAX_RECORD_TYPE_LENGTH)
+    )
+)
+
+(define-private (is-valid-record-content (content-to-validate (string-ascii 256)))
+    (<= (len content-to-validate) MAX_RECORD_CONTENT_LENGTH)
+)
+
 ;; Public functions
 
 ;; Preorder a domain (hash commitment)
@@ -52,6 +80,7 @@
                 preorder-creation-block: block-height
             })
         )
+        (asserts! (is-valid-commitment-hash domain-commitment-hash) ERROR-INVALID-HASH)
         (asserts! (>= preorder-payment-ustx REGISTRATION-FEE-IN_MICRO_STX) ERROR-INSUFFICIENT-PAYMENT)
         (try! (stx-burn? preorder-payment-ustx tx-sender))
         (ok (map-set domain-registration-preorders {domain-commitment-hash: domain-commitment-hash} preorder-data))
@@ -62,7 +91,7 @@
 (define-public (register-domain (requested-domain-name (string-ascii 64)) (commitment-salt (buff 32)))
     (let
         (
-            (calculated-commitment-hash (hash160 commitment-salt))  ;; Using just the salt for now
+            (calculated-commitment-hash (hash160 commitment-salt))
             (preorder-data (unwrap! (map-get? domain-registration-preorders {domain-commitment-hash: calculated-commitment-hash}) ERROR-DOMAIN-NOT-REGISTERED))
             (new-registration-entry {
                 current-owner: tx-sender,
@@ -72,9 +101,9 @@
                 domain-commitment-hash: calculated-commitment-hash
             })
         )
+        (asserts! (is-valid-domain-name requested-domain-name) ERROR-INVALID-DOMAIN-NAME)
+        (asserts! (is-valid-commitment-hash calculated-commitment-hash) ERROR-INVALID-HASH)
         (asserts! (is-none (map-get? domain-ownership-registry {registered-domain-name: requested-domain-name})) ERROR-DOMAIN-ALREADY-REGISTERED)
-        (asserts! (>= (len requested-domain-name) MIN-DOMAIN-LENGTH) ERROR-INVALID-DOMAIN-NAME)
-        (asserts! (<= (len requested-domain-name) MAX-DOMAIN-LENGTH) ERROR-INVALID-DOMAIN-NAME)
         (asserts! (is-eq tx-sender (get preorder-principal preorder-data)) ERROR-NOT-AUTHORIZED)
         
         (map-delete domain-registration-preorders {domain-commitment-hash: calculated-commitment-hash})
@@ -88,6 +117,7 @@
         (
             (current-registration (unwrap! (map-get? domain-ownership-registry {registered-domain-name: domain-name-to-transfer}) ERROR-DOMAIN-NOT-REGISTERED))
         )
+        (asserts! (is-valid-domain-name domain-name-to-transfer) ERROR-INVALID-DOMAIN-NAME)
         (asserts! (is-eq tx-sender (get current-owner current-registration)) ERROR-NOT-AUTHORIZED)
         (asserts! (< block-height (get expiration-block-height current-registration)) ERROR-DOMAIN-EXPIRED)
         
@@ -104,6 +134,7 @@
         (
             (current-registration (unwrap! (map-get? domain-ownership-registry {registered-domain-name: domain-name-to-renew}) ERROR-DOMAIN-NOT-REGISTERED))
         )
+        (asserts! (is-valid-domain-name domain-name-to-renew) ERROR-INVALID-DOMAIN-NAME)
         (asserts! (is-eq tx-sender (get current-owner current-registration)) ERROR-NOT-AUTHORIZED)
         (try! (stx-burn? REGISTRATION-FEE-IN_MICRO_STX tx-sender))
         
@@ -122,6 +153,7 @@
         (
             (current-registration (unwrap! (map-get? domain-ownership-registry {registered-domain-name: domain-name-to-update}) ERROR-DOMAIN-NOT-REGISTERED))
         )
+        (asserts! (is-valid-domain-name domain-name-to-update) ERROR-INVALID-DOMAIN-NAME)
         (asserts! (is-eq tx-sender (get current-owner current-registration)) ERROR-NOT-AUTHORIZED)
         (asserts! (< block-height (get expiration-block-height current-registration)) ERROR-DOMAIN-EXPIRED)
         
@@ -138,6 +170,9 @@
         (
             (current-registration (unwrap! (map-get? domain-ownership-registry {registered-domain-name: domain-name-to-update}) ERROR-DOMAIN-NOT-REGISTERED))
         )
+        (asserts! (is-valid-domain-name domain-name-to-update) ERROR-INVALID-DOMAIN-NAME)
+        (asserts! (is-valid-record-type record-type) ERROR-INVALID-RECORD-TYPE)
+        (asserts! (is-valid-record-content record-content) ERROR-INVALID-RECORD-CONTENT)
         (asserts! (is-eq tx-sender (get current-owner current-registration)) ERROR-NOT-AUTHORIZED)
         (asserts! (< block-height (get expiration-block-height current-registration)) ERROR-DOMAIN-EXPIRED)
         
@@ -170,15 +205,5 @@
     (match (map-get? domain-ownership-registry {registered-domain-name: requested-domain-name})
         domain-registration-details (ok (get expiration-block-height domain-registration-details))
         ERROR-DOMAIN-NOT-REGISTERED
-    )
-)
-
-;; Private functions
-
-;; Validate domain name
-(define-private (is-valid-domain-name (domain-name-to-validate (string-ascii 64)))
-    (and
-        (>= (len domain-name-to-validate) MIN-DOMAIN-LENGTH)
-        (<= (len domain-name-to-validate) MAX-DOMAIN-LENGTH)
     )
 )
